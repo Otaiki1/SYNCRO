@@ -1,344 +1,884 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ArrowLeft, ArrowRight, CheckCircle2 } from "lucide-react"
+import { ArrowLeft, ArrowRight, CheckCircle2, Clock, Mail, Shield, Zap, Plus, X, Key, Eye, EyeOff } from "lucide-react"
 
-export default function OnboardingModal({ onClose }) {
+export default function OnboardingModal({ onClose, onModeSelect, darkMode = false }) {
   const [step, setStep] = useState(1)
-  const [emailConnected, setEmailConnected] = useState(false)
-  const [bankingConnected, setBankingConnected] = useState(false)
+  const [connectionMethod, setConnectionMethod] = useState<"gmail" | "plaid" | "manual" | null>(null)
   const [isScanning, setIsScanning] = useState(false)
-  const [scannedSubscriptions, setScannedSubscriptions] = useState([])
+  const [scanProgress, setScanProgress] = useState({ emails: 0, subscriptions: 0, time: 0 })
+  const [foundSubscriptions, setFoundSubscriptions] = useState<any[]>([])
+  const [selectedSubscriptions, setSelectedSubscriptions] = useState<Set<number>>(new Set())
+  const [connectedEmails, setConnectedEmails] = useState<string[]>([])
+  const [showAddAnotherEmail, setShowAddAnotherEmail] = useState(false)
+  const [apiKeys, setApiKeys] = useState<Record<string, { key: string; show: boolean }>>({})
+
   const [formData, setFormData] = useState({
     name: "",
     role: "",
     toolsCount: "",
+    aiToolsCount: "", // Added separate field for AI tools
     monthlySpend: "",
+    budgetLimit: "",
+    budgetAlert: true,
+    notifications: {
+      billingReminders: true,
+      weeklyReports: false,
+      recommendations: true,
+    },
   })
 
   useEffect(() => {
-    if (emailConnected && isScanning) {
-      const timer = setTimeout(() => {
-        const foundSubs = [
-          { name: "ChatGPT Pro", cost: "$20/month", icon: "🤖" },
-          { name: "Midjourney", cost: "$30/month", icon: "🎨" },
-          { name: "Claude Pro", cost: "$20/month", icon: "✨" },
-          { name: "Perplexity Pro", cost: "$20/month", icon: "🔍" },
-        ]
-        setScannedSubscriptions(foundSubs)
-        setIsScanning(false)
-      }, 3000)
-      return () => clearTimeout(timer)
+    if (isScanning) {
+      const interval = setInterval(() => {
+        setScanProgress((prev) => {
+          if (prev.time >= 45) {
+            clearInterval(interval)
+            setIsScanning(false)
+            // Show found subscriptions
+            const subs = [
+              { id: 1, name: "Midjourney", cost: 20, icon: "🎨", email: connectedEmails[connectedEmails.length - 1] },
+              { id: 2, name: "Midjourney", cost: 30, icon: "🎨", email: connectedEmails[connectedEmails.length - 1] },
+              { id: 3, name: "Midjourney", cost: 10, icon: "🎨", email: connectedEmails[connectedEmails.length - 1] },
+              { id: 4, name: "Midjourney", cost: 20, icon: "🎨", email: connectedEmails[connectedEmails.length - 1] },
+              { id: 5, name: "ChatGPT Pro", cost: 20, icon: "🤖", email: connectedEmails[connectedEmails.length - 1] },
+              { id: 6, name: "Claude Pro", cost: 20, icon: "✨", email: connectedEmails[connectedEmails.length - 1] },
+              { id: 7, name: "Perplexity", cost: 20, icon: "🔍", email: connectedEmails[connectedEmails.length - 1] },
+              {
+                id: 8,
+                name: "GitHub Copilot",
+                cost: 10,
+                icon: "💻",
+                email: connectedEmails[connectedEmails.length - 1],
+              },
+            ]
+            setFoundSubscriptions([...foundSubscriptions, ...subs])
+            const newSelected = new Set(selectedSubscriptions)
+            subs.forEach((s) => newSelected.add(s.id))
+            setSelectedSubscriptions(newSelected)
+            return prev
+          }
+          return {
+            emails: Math.min(prev.emails + 50, 1247),
+            subscriptions: Math.min(prev.subscriptions + 1, 10),
+            time: prev.time + 1,
+          }
+        })
+      }, 100)
+      return () => clearInterval(interval)
     }
-  }, [emailConnected, isScanning])
+  }, [isScanning, connectedEmails, foundSubscriptions, selectedSubscriptions])
+
+  const handleConnectGmail = () => {
+    console.log("[v0] Connecting Gmail account...")
+    // Simulate Gmail OAuth flow
+    const mockEmail = `user${connectedEmails.length + 1}@gmail.com`
+    setConnectedEmails([...connectedEmails, mockEmail])
+    setIsScanning(true)
+    setShowAddAnotherEmail(false)
+  }
+
+  const handleRemoveEmail = (email: string) => {
+    setConnectedEmails(connectedEmails.filter((e) => e !== email))
+    // Remove subscriptions from this email
+    const subsToRemove = foundSubscriptions.filter((sub) => sub.email === email).map((sub) => sub.id)
+    setFoundSubscriptions(foundSubscriptions.filter((sub) => sub.email !== email))
+    const newSelected = new Set(selectedSubscriptions)
+    subsToRemove.forEach((id) => newSelected.delete(id))
+    setSelectedSubscriptions(newSelected)
+  }
 
   const handleBack = () => {
     if (step > 1) {
       setStep(step - 1)
-      setScannedSubscriptions([])
-      setIsScanning(false)
+      if (step === 3) {
+        setIsScanning(false)
+        setScanProgress({ emails: 0, subscriptions: 0, time: 0 })
+      }
     }
   }
 
   const handleNext = () => {
-    if (step === 4) {
-      setStep(5) // Go to email connection
-    } else if (step === 5 && emailConnected && scannedSubscriptions.length > 0) {
-      setStep(6) // Go to banking connection (optional)
-    } else if (step === 6) {
-      onClose()
-    } else if (step < 4) {
+    if (step === 2 && connectionMethod === "gmail") {
+      handleConnectGmail()
+      setStep(3)
+    } else if (step === 2 && (connectionMethod === "plaid" || connectionMethod === "manual")) {
+      setStep(4)
+    } else if (step < 6) {
       setStep(step + 1)
     }
   }
 
-  const handleConnectEmail = () => {
-    setEmailConnected(true)
-    setIsScanning(true)
-  }
-
-  const handleConnectBanking = () => {
-    setBankingConnected(true)
-  }
-
-  const handleSkipBanking = () => {
+  const handleModeSelection = (mode: "individual" | "enterprise") => {
+    onModeSelect(mode)
     onClose()
   }
 
+  const toggleSubscription = (id: number) => {
+    const newSelected = new Set(selectedSubscriptions)
+    if (newSelected.has(id)) {
+      newSelected.delete(id)
+    } else {
+      newSelected.add(id)
+    }
+    setSelectedSubscriptions(newSelected)
+  }
+
+  const totalCost = foundSubscriptions
+    .filter((sub) => selectedSubscriptions.has(sub.id))
+    .reduce((sum, sub) => sum + sub.cost, 0)
+
   const isStepValid = () => {
-    if (step === 1) return formData.name.trim() !== ""
-    if (step === 2) return formData.role.trim() !== ""
-    if (step === 3) return formData.toolsCount !== ""
-    if (step === 4) return formData.monthlySpend.trim() !== ""
-    if (step === 5) return emailConnected && scannedSubscriptions.length > 0
-    if (step === 6) return true // Plaid is optional, always valid
+    if (step === 1) return formData.name && formData.role && formData.toolsCount && formData.monthlySpend
+    if (step === 2) return connectionMethod !== null
+    if (step === 3) return !isScanning && foundSubscriptions.length > 0
+    if (step === 4) return true
+    if (step === 5) return true
     return false
   }
 
+  const progressDots = [1, 2, 3, 4, 5]
+
+  const aiTools = foundSubscriptions.filter(
+    (sub) => sub.icon === "🤖" || sub.icon === "🖼️" || sub.icon === "💻" || sub.icon === "✨" || sub.icon === "🔍",
+  )
+
+  const handleToggleApiKeyVisibility = (toolName: string) => {
+    setApiKeys((prev) => ({
+      ...prev,
+      [toolName]: {
+        ...prev[toolName],
+        show: !prev[toolName]?.show,
+      },
+    }))
+  }
+
+  const handleApiKeyChange = (toolName: string, value: string) => {
+    setApiKeys((prev) => ({
+      ...prev,
+      [toolName]: {
+        key: value,
+        show: prev[toolName]?.show || false,
+      },
+    }))
+  }
+
+  const getLeftContent = () => {
+    if (step === 1) {
+      return {
+        title: "Welcome to\nSubsync",
+        description:
+          "Track all your subscriptions in one place. Optimize your spending and never miss a renewal again.",
+      }
+    } else if (step === 2) {
+      return {
+        title: "Connect Your\nAccounts",
+        description: "We'll automatically discover your subscriptions and track your spending across all services.",
+      }
+    } else if (step === 3) {
+      return {
+        title: isScanning ? "Scanning\nYour Gmail" : "Setting up\nYour Dashboard",
+        description: "We're securely analyzing your emails to find subscription receipts and billing information.",
+        showStats: true,
+      }
+    } else if (step === 4) {
+      return {
+        title: "Setting up\nYour Dashboard",
+        description:
+          "We're creating your personalized subscription management dashboard with smart insights and recommendations.",
+        showProgress: true,
+      }
+    } else if (step === 5) {
+      return {
+        title: "Enable Deep\nUsage Tracking",
+        description:
+          "Connect your AI tool API keys to track actual usage, get accurate cost predictions, and receive alerts when you're not using paid tools.",
+      }
+    } else {
+      return {
+        title: "Choose Your\nAccount Type",
+        description: "Select the plan that works best for you",
+      }
+    }
+  }
+
+  const leftContent = getLeftContent()
+
   return (
     <div className="fixed inset-0 bg-black z-50 flex">
-      <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-        @keyframes slide-in {
-          from {
-            opacity: 0;
-            transform: translateY(10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-        .animate-spin {
-          animation: spin 1s linear infinite;
-        }
-        .animate-slide-in {
-          animation: slide-in 0.5s ease-out forwards;
-        }
-      `}</style>
-
       {/* Left Side - Branding */}
-      <div className="w-1/2 bg-black text-white p-12 flex flex-col justify-between">
+      <div className="w-1/2 bg-[#1E2A35] text-white p-12 flex flex-col justify-between">
         <div>
-          <h1 className="text-3xl font-bold mb-2">Subsync.AI</h1>
+          <h1 className="text-2xl font-bold mb-2">Subsync</h1>
         </div>
 
         <div>
-          <h2 className="text-4xl font-bold mb-4">Welcome to Subsync.AI</h2>
-          <p className="text-gray-300 text-lg mb-8">
-            Track your AI subscription in one place. Optimize your spending and never miss a renewal again
-          </p>
+          <h2 className="text-4xl font-bold mb-6 leading-tight whitespace-pre-line">{leftContent.title}</h2>
+          <p className="text-gray-300 text-base mb-8 leading-relaxed">{leftContent.description}</p>
 
-          <div className="flex flex-wrap gap-3">
-            <button className="px-4 py-2 bg-white text-black rounded-full font-medium text-sm hover:bg-gray-100">
-              Smart analysis
-            </button>
-            <button className="px-4 py-2 bg-white text-black rounded-full font-medium text-sm hover:bg-gray-100">
-              Cost optimization
-            </button>
-            <button className="px-4 py-2 bg-white text-black rounded-full font-medium text-sm hover:bg-gray-100">
-              Bank level security
-            </button>
-          </div>
+          {leftContent.showStats && (
+            <div className="space-y-4 mb-8">
+              <div className="flex justify-between items-center">
+                <span className="text-gray-300">Emails scanned:</span>
+                <span className="text-white font-semibold">{scanProgress.emails.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-300">Subscriptions found:</span>
+                <span className="text-[#007A5C] font-semibold">{scanProgress.subscriptions}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-300">Processing time:</span>
+                <span className="text-white font-semibold">00:{scanProgress.time.toString().padStart(2, "0")}</span>
+              </div>
+            </div>
+          )}
+
+          {leftContent.showProgress && (
+            <div className="space-y-3 mb-8">
+              <div className="flex items-center gap-3 text-gray-300">
+                <CheckCircle2 className="w-5 h-5 text-[#007A5C]" />
+                <span>Analysing subscription patterns</span>
+              </div>
+              <div className="flex items-center gap-3 text-gray-300">
+                <CheckCircle2 className="w-5 h-5 text-[#007A5C]" />
+                <span>Setting up cost tracking</span>
+              </div>
+              <div className="flex items-center gap-3 text-gray-300">
+                <CheckCircle2 className="w-5 h-5 text-[#007A5C]" />
+                <span>Creating smart recommendation</span>
+              </div>
+            </div>
+          )}
+
+          {step <= 2 && (
+            <div className="flex flex-wrap gap-3">
+              <span className="px-4 py-2 bg-white/10 backdrop-blur-sm text-white rounded-full text-sm border border-white/20">
+                Smart analysis
+              </span>
+              <span className="px-4 py-2 bg-white/10 backdrop-blur-sm text-white rounded-full text-sm border border-white/20">
+                Cost optimization
+              </span>
+              <span className="px-4 py-2 bg-white/10 backdrop-blur-sm text-white rounded-full text-sm border border-white/20">
+                Bank level security
+              </span>
+            </div>
+          )}
         </div>
 
-        <div className="text-gray-400 text-sm">© 2025 Subsync.AI. All rights reserved.</div>
+        <div className="text-gray-400 text-sm">© 2025 Subsync. All rights reserved.</div>
       </div>
 
       {/* Right Side - Form */}
-      <div className="w-1/2 bg-white p-12 flex flex-col justify-between">
+      <div className="w-1/2 bg-[#F9F6F2] p-12 flex flex-col">
         {/* Header */}
-        <div>
+        <div className="mb-8">
           <div className="flex items-center justify-between mb-8">
             <button
               onClick={handleBack}
               disabled={step === 1}
-              className="p-2 hover:bg-gray-100 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+              className="p-2 hover:bg-gray-200 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               <ArrowLeft className="w-5 h-5 text-gray-700" />
             </button>
-            <span className="text-sm text-gray-500">Step {step} out of 6</span>
+            {step <= 5 && <span className="text-sm text-gray-500">Step {step} out of 5</span>}
           </div>
 
-          <h3 className="text-3xl font-bold text-gray-900 mb-2">Let's get you started</h3>
-          <p className="text-gray-600 mb-8">First tell us a bit about yourself to personalise your experience</p>
+          {step <= 5 && (
+            <div className="flex gap-2 mb-8">
+              {progressDots.map((dot) => (
+                <div
+                  key={dot}
+                  className={`h-1 flex-1 rounded-full transition-colors ${dot <= step ? "bg-gray-900" : "bg-gray-300"}`}
+                />
+              ))}
+            </div>
+          )}
+
+          <h3 className="text-3xl font-bold text-gray-900 mb-3">
+            {step === 1 && "Let's get you started"}
+            {step === 2 && "How would you like to connect?"}
+            {step === 3 && "Found Your Subscriptions"}
+            {step === 4 && "Customise Your Experience"}
+            {step === 5 && "Connect Your AI Tools"}
+            {step === 6 && "Choose Your Account Type"}
+          </h3>
+          <p className="text-gray-600 text-base">
+            {step === 1 && "First tell us a bit about yourself to personalise your experience"}
+            {step === 2 && "Choose the method that works best for you. You can always add more later."}
+            {step === 3 &&
+              `Great! We discovered ${foundSubscriptions.length} subscriptions across ${connectedEmails.length} email${connectedEmails.length !== 1 ? "s" : ""}. Review and confirm below.`}
+            {step === 4 && "Let's personalise your dashboard with smart settings and preferences."}
+            {step === 5 && "Add API keys to track actual usage and get accurate insights. This step is optional."}
+            {step === 6 && "Select the plan that works best for you"}
+          </p>
         </div>
 
         {/* Form Content */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto mb-8">
           {step === 1 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">What is your name?</label>
-              <input
-                type="text"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="Enter your name"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
-              />
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">What is your name?</label>
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  placeholder="Enter your name"
+                  className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 text-gray-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">What is your Role?</label>
+                <input
+                  type="text"
+                  value={formData.role}
+                  onChange={(e) => setFormData({ ...formData, role: e.target.value })}
+                  placeholder="e.g., Product Manager, Developer"
+                  className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 text-gray-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-3">
+                  How many subscriptions do you currently have?
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  {["1-5 subscriptions", "6-10 subscriptions", "11-20 subscriptions", "20+ subscriptions"].map(
+                    (option) => (
+                      <button
+                        key={option}
+                        onClick={() => setFormData({ ...formData, toolsCount: option })}
+                        className={`p-4 rounded-lg border-2 font-medium transition-all ${
+                          formData.toolsCount === option
+                            ? "border-gray-900 bg-gray-50 text-gray-900"
+                            : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"
+                        }`}
+                      >
+                        {option}
+                      </button>
+                    ),
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-3">How many of those are AI tools?</label>
+                <div className="grid grid-cols-2 gap-3">
+                  {["None", "1-3 AI tools", "4-7 AI tools", "8+ AI tools"].map((option) => (
+                    <button
+                      key={option}
+                      onClick={() => setFormData({ ...formData, aiToolsCount: option })}
+                      className={`p-4 rounded-lg border-2 font-medium transition-all ${
+                        formData.aiToolsCount === option
+                          ? "border-gray-900 bg-gray-50 text-gray-900"
+                          : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"
+                      }`}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Approximate monthly spend on all subscriptions
+                </label>
+                <input
+                  type="text"
+                  value={formData.monthlySpend}
+                  onChange={(e) => setFormData({ ...formData, monthlySpend: e.target.value })}
+                  placeholder="e.g., $200"
+                  className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 text-gray-900"
+                />
+                <p className="text-xs text-gray-500 mt-2">This helps us provide better insights</p>
+              </div>
             </div>
           )}
 
           {step === 2 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">What is your Role?</label>
-              <input
-                type="text"
-                value={formData.role}
-                onChange={(e) => setFormData({ ...formData, role: e.target.value })}
-                placeholder="e.g., Product Manager, Developer"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
-              />
+            <div className="space-y-4">
+              <button
+                onClick={() => setConnectionMethod("gmail")}
+                className={`w-full p-6 rounded-lg border-2 transition-all text-left ${
+                  connectionMethod === "gmail"
+                    ? "border-gray-900 bg-white"
+                    : "border-gray-300 bg-white hover:border-gray-400"
+                }`}
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <h4 className="text-lg font-semibold text-gray-900">Connect Gmail</h4>
+                  <Mail className="w-6 h-6 text-gray-600" />
+                </div>
+                <p className="text-sm text-gray-600 mb-4">
+                  We'll scan your receipts and billing emails to automatically detect all your subscriptions.
+                </p>
+                <div className="flex items-center gap-4 text-xs text-gray-500">
+                  <div className="flex items-center gap-1">
+                    <Zap className="w-4 h-4" />
+                    <span>Automatic detection</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Clock className="w-4 h-4" />
+                    <span>2min Setup</span>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => setConnectionMethod("plaid")}
+                className={`w-full p-6 rounded-lg border-2 transition-all text-left ${
+                  connectionMethod === "plaid"
+                    ? "border-gray-900 bg-white"
+                    : "border-gray-300 bg-white hover:border-gray-400"
+                }`}
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <h4 className="text-lg font-semibold text-gray-900">Connect Bank via Plaid</h4>
+                  <Shield className="w-6 h-6 text-gray-600" />
+                </div>
+                <p className="text-sm text-gray-600 mb-4">
+                  Securely connect your bank account to track all subscription-related transactions automatically.
+                </p>
+                <div className="flex items-center gap-4 text-xs text-gray-500">
+                  <div className="flex items-center gap-1">
+                    <Shield className="w-4 h-4" />
+                    <span>Bank-grade security</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Clock className="w-4 h-4" />
+                    <span>Read-only access</span>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => setConnectionMethod("manual")}
+                className={`w-full p-6 rounded-lg border-2 transition-all text-left ${
+                  connectionMethod === "manual"
+                    ? "border-gray-900 bg-white"
+                    : "border-gray-300 bg-white hover:border-gray-400"
+                }`}
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <h4 className="text-lg font-semibold text-gray-900">Add Manually</h4>
+                  <span className="text-2xl">✏️</span>
+                </div>
+                <p className="text-sm text-gray-600 mb-4">
+                  Prefer to add your subscriptions one by one? No problem, we'll guide you through it.
+                </p>
+                <div className="flex items-center gap-4 text-xs text-gray-500">
+                  <div className="flex items-center gap-1">
+                    <span>✓</span>
+                    <span>Full control</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Clock className="w-4 h-4" />
+                    <span>5 min setup</span>
+                  </div>
+                </div>
+              </button>
+
+              <div className="mt-6 p-4 bg-gray-100 rounded-lg">
+                <p className="text-sm text-gray-700 font-medium mb-1">Your privacy is our priority</p>
+                <p className="text-xs text-gray-600">
+                  We only read billing emails from verified service providers. Your personal emails and sensitive data
+                  remain completely private and encrypted.
+                </p>
+              </div>
             </div>
           )}
 
           {step === 3 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-4">
-                How many AI tools do you currently use?
-              </label>
-              <div className="grid grid-cols-2 gap-3">
-                {["1-3 tools", "4-7 tools", "8- 15 tools", "15+ tools"].map((option) => (
-                  <button
-                    key={option}
-                    onClick={() => setFormData({ ...formData, toolsCount: option })}
-                    className={`p-4 rounded-lg border-2 font-medium transition-colors ${
-                      formData.toolsCount === option
-                        ? "border-black bg-black text-white"
-                        : "border-gray-300 text-gray-700 hover:border-gray-400"
-                    }`}
-                  >
-                    {option}
-                  </button>
-                ))}
+            <div className="space-y-4">
+              {connectedEmails.length > 0 && (
+                <div className="mb-4">
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Connected Email Accounts</h4>
+                  <div className="space-y-2">
+                    {connectedEmails.map((email, index) => (
+                      <div
+                        key={email}
+                        className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Mail className="w-4 h-4 text-gray-600" />
+                          <span className="text-sm text-gray-900">{email}</span>
+                          {index === 0 && (
+                            <span className="px-2 py-0.5 bg-[#FFD166] text-[#1E2A35] text-xs font-medium rounded">
+                              Primary
+                            </span>
+                          )}
+                        </div>
+                        {index > 0 && (
+                          <button
+                            onClick={() => handleRemoveEmail(email)}
+                            className="p-1 hover:bg-gray-100 rounded transition-colors"
+                          >
+                            <X className="w-4 h-4 text-gray-600" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!isScanning && !showAddAnotherEmail && (
+                <button
+                  onClick={() => setShowAddAnotherEmail(true)}
+                  className="w-full py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-600 hover:border-gray-400 hover:text-gray-900 transition-colors flex items-center justify-center gap-2 font-medium"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Another Email Account
+                </button>
+              )}
+
+              {showAddAnotherEmail && !isScanning && (
+                <div className="p-4 bg-white rounded-lg border border-gray-200">
+                  <p className="text-sm text-gray-700 mb-3">Connect another Gmail account to find more subscriptions</p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleConnectGmail}
+                      className="flex-1 px-4 py-2 bg-[#007A5C] text-white rounded-lg text-sm font-medium hover:bg-[#007A5C]/90"
+                    >
+                      Connect Gmail
+                    </button>
+                    <button
+                      onClick={() => setShowAddAnotherEmail(false)}
+                      className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {foundSubscriptions.slice(0, 4).map((sub) => (
+                <div
+                  key={sub.id}
+                  onClick={() => toggleSubscription(sub.id)}
+                  className="flex items-center justify-between p-4 bg-white rounded-lg border border-gray-200 cursor-pointer hover:border-gray-300 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 bg-gray-900 rounded-lg"></div>
+                    <div>
+                      <p className="font-medium text-gray-900">{sub.name}</p>
+                      <p className="text-sm text-gray-600">${sub.cost}.00/month</p>
+                      {sub.email && <p className="text-xs text-gray-500">{sub.email}</p>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-3 py-1 bg-[#007A5C]/10 text-[#007A5C] text-xs font-medium rounded-full">
+                      Active
+                    </span>
+                    {selectedSubscriptions.has(sub.id) && <CheckCircle2 className="w-5 h-5 text-[#007A5C]" />}
+                  </div>
+                </div>
+              ))}
+
+              {foundSubscriptions.length > 4 && (
+                <button className="w-full py-3 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors flex items-center justify-center gap-2">
+                  <span className="text-xl">+</span>
+                  Show {foundSubscriptions.length - 4} more subscriptions
+                </button>
+              )}
+
+              <div className="mt-6 p-6 bg-white rounded-lg border border-gray-200">
+                <h4 className="font-semibold text-gray-900 mb-4">Monthly Summary</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-3xl font-bold text-gray-900">${totalCost}</p>
+                    <p className="text-sm text-gray-600">Total montly cost</p>
+                  </div>
+                  <div>
+                    <p className="text-3xl font-bold text-gray-900">{selectedSubscriptions.size}</p>
+                    <p className="text-sm text-gray-600">Active subscriptions</p>
+                  </div>
+                </div>
               </div>
             </div>
           )}
 
           {step === 4 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-3">Approximately monthly AI spend.</label>
-              <input
-                type="text"
-                value={formData.monthlySpend}
-                onChange={(e) => setFormData({ ...formData, monthlySpend: e.target.value })}
-                placeholder="e.g., $100"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent"
-              />
-              <p className="text-xs text-gray-500 mt-2">This helps us provide better insights</p>
+            <div className="space-y-6">
+              <div className="bg-white p-6 rounded-lg border border-gray-200">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-6 h-6 bg-gray-900 rounded flex items-center justify-center">
+                    <span className="text-white text-xs">🔔</span>
+                  </div>
+                  <h4 className="font-semibold text-gray-900">Notification Preference</h4>
+                </div>
+                <div className="space-y-3">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.notifications.billingReminders}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          notifications: { ...formData.notifications, billingReminders: e.target.checked },
+                        })
+                      }
+                      className="w-4 h-4"
+                    />
+                    <span className="text-sm text-gray-700">Billing reminders</span>
+                  </label>
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.notifications.weeklyReports}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          notifications: { ...formData.notifications, weeklyReports: e.target.checked },
+                        })
+                      }
+                      className="w-4 h-4"
+                    />
+                    <span className="text-sm text-gray-700">Weekly reports</span>
+                  </label>
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.notifications.recommendations}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          notifications: { ...formData.notifications, recommendations: e.target.checked },
+                        })
+                      }
+                      className="w-4 h-4"
+                    />
+                    <span className="text-sm text-gray-700">Cost-saving recommendations</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="bg-white p-6 rounded-lg border border-gray-200">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-6 h-6 bg-gray-900 rounded flex items-center justify-center">
+                    <span className="text-white text-xs">💰</span>
+                  </div>
+                  <h4 className="font-semibold text-gray-900">Budget settings</h4>
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Monthly AI budget limit</label>
+                    <input
+                      type="text"
+                      value={formData.budgetLimit}
+                      onChange={(e) => setFormData({ ...formData, budgetLimit: e.target.value })}
+                      placeholder="e.g., $150"
+                      className="w-full px-4 py-2 bg-[#F9F6F2] border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 text-gray-900"
+                    />
+                  </div>
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.budgetAlert}
+                      onChange={(e) => setFormData({ ...formData, budgetAlert: e.target.checked })}
+                      className="w-4 h-4"
+                    />
+                    <span className="text-sm text-gray-700">Alert me when I reach 80% of my budget</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="bg-gray-100 p-6 rounded-lg">
+                <h4 className="font-semibold text-gray-900 mb-4">Setup summary</h4>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Email Accounts:</span>
+                    <span className="font-medium text-gray-900">{connectedEmails.length}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Subscriptions Imported:</span>
+                    <span className="font-medium text-gray-900">{foundSubscriptions.length} services</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Monthly total:</span>
+                    <span className="font-medium text-[#007A5C]">${totalCost}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Budget Limit:</span>
+                    <span className="font-medium text-gray-900">${formData.budgetLimit || "200"}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
           {step === 5 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-4">Connect your email to continue</label>
-              <p className="text-sm text-gray-600 mb-6">
-                We'll automatically track your AI subscriptions from your email receipts and invoices.
-              </p>
-
-              {!emailConnected ? (
-                <button
-                  onClick={handleConnectEmail}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-3 border-2 border-gray-300 rounded-lg hover:border-black transition-colors"
-                >
-                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path
-                      d="M22 4H2C0.9 4 0 4.9 0 6v12c0 1.1 0.9 2 2 2h20c1.1 0 2-0.9 2-2V6c0-1.1-0.9-2-2-2z"
-                      fill="#EA4335"
-                    />
-                    <path d="M12 12.5L2 6h20L12 12.5z" fill="#FBBC04" />
-                    <path d="M0 6l12 9.5L24 6" stroke="#34A853" strokeWidth="0.5" fill="none" />
-                  </svg>
-                  <span className="font-medium text-gray-900">Connect Gmail</span>
-                </button>
-              ) : (
-                <div className="space-y-4">
-                  <div className="flex items-center gap-3 p-4 bg-green-50 border border-green-200 rounded-lg">
-                    <div className="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
-                      <span className="text-white text-sm">✓</span>
-                    </div>
-                    <div>
-                      <p className="font-medium text-gray-900">Gmail connected</p>
-                      <p className="text-sm text-gray-600">Your email is now synced</p>
-                    </div>
+            <div className="space-y-6">
+              <div className="bg-[#007A5C]/10 p-4 rounded-lg border border-[#007A5C]/20">
+                <div className="flex items-start gap-3">
+                  <Key className="w-5 h-5 text-[#007A5C] mt-0.5" />
+                  <div>
+                    <h4 className="font-semibold text-gray-900 mb-1">Why connect API keys?</h4>
+                    <ul className="text-sm text-gray-700 space-y-1">
+                      <li>• Track actual API usage and costs in real-time</li>
+                      <li>• Get alerts when you're paying for unused tools</li>
+                      <li>• Accurate cost predictions based on usage patterns</li>
+                      <li>• Identify optimization opportunities</li>
+                    </ul>
                   </div>
+                </div>
+              </div>
 
-                  {isScanning && (
-                    <div className="flex items-center gap-3">
-                      <div className="w-5 h-5 border-2 border-gray-300 border-t-black rounded-full animate-spin"></div>
-                      <p className="text-sm text-gray-700">Scanning your emails for AI subscriptions...</p>
-                    </div>
-                  )}
-
-                  {scannedSubscriptions.length > 0 && !isScanning && (
-                    <div className="space-y-3">
-                      <p className="text-sm font-medium text-gray-700">
-                        Found {scannedSubscriptions.length} subscriptions:
-                      </p>
-                      <div className="space-y-2">
-                        {scannedSubscriptions.map((sub, idx) => (
-                          <div
-                            key={idx}
-                            className="animate-slide-in flex items-center justify-between py-2"
-                            style={{ animationDelay: `${idx * 0.1}s` }}
-                          >
-                            <div className="flex items-center gap-3">
-                              <span className="text-xl">{sub.icon}</span>
-                              <div>
-                                <p className="font-medium text-gray-900">{sub.name}</p>
-                                <p className="text-xs text-gray-600">{sub.cost}</p>
-                              </div>
-                            </div>
-                            <CheckCircle2 className="w-5 h-5 text-green-500" />
-                          </div>
-                        ))}
+              {aiTools.length > 0 ? (
+                <div className="space-y-4">
+                  <h4 className="text-sm font-medium text-gray-700">
+                    We found {aiTools.length} AI tool{aiTools.length !== 1 ? "s" : ""} in your subscriptions
+                  </h4>
+                  {aiTools.map((tool) => (
+                    <div key={tool.id} className="bg-white p-4 rounded-lg border border-gray-200">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-10 h-10 bg-gray-900 rounded-lg flex items-center justify-center text-xl">
+                          {tool.icon}
+                        </div>
+                        <div className="flex-1">
+                          <p className="font-medium text-gray-900">{tool.name}</p>
+                          <p className="text-xs text-gray-600">${tool.cost}/month</p>
+                        </div>
                       </div>
+                      <div className="relative">
+                        <input
+                          type={apiKeys[tool.name]?.show ? "text" : "password"}
+                          value={apiKeys[tool.name]?.key || ""}
+                          onChange={(e) => handleApiKeyChange(tool.name, e.target.value)}
+                          placeholder="Enter API key (optional)"
+                          className="w-full px-4 py-2 pr-10 bg-[#F9F6F2] border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 text-gray-900 text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleToggleApiKeyVisibility(tool.name)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                        >
+                          {apiKeys[tool.name]?.show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Find your API key in {tool.name} settings → API or Developer section
+                      </p>
                     </div>
-                  )}
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-gray-100 p-6 rounded-lg text-center">
+                  <p className="text-gray-600">No AI tools detected yet. You can add API keys later from Settings.</p>
                 </div>
               )}
+
+              <div className="bg-gray-100 p-4 rounded-lg">
+                <p className="text-sm text-gray-700 font-medium mb-1">🔒 Your API keys are secure</p>
+                <p className="text-xs text-gray-600">
+                  All API keys are encrypted and stored securely. We only use them to fetch usage data - we never make
+                  changes to your accounts or access sensitive information.
+                </p>
+              </div>
             </div>
           )}
 
           {step === 6 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-4">
-                Connect your bank account (Optional)
-              </label>
-              <p className="text-sm text-gray-600 mb-6">
-                Link your bank account to automatically track subscription payments and get better spending insights.
-              </p>
-
-              {!bankingConnected ? (
-                <button
-                  onClick={handleConnectBanking}
-                  className="w-full flex items-center justify-center gap-3 px-4 py-3 border-2 border-gray-300 rounded-lg hover:border-black transition-colors"
-                >
-                  <svg className="w-5 h-5" viewBox="0 0 126 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect x="8" y="8" width="8" height="8" fill="#0066FF" />
-                    <rect x="20" y="8" width="8" height="8" fill="#0066FF" />
-                    <rect x="8" y="20" width="8" height="8" fill="#0066FF" />
-                    <rect x="20" y="20" width="8" height="8" fill="#0066FF" />
-                    <text x="40" y="24" fontSize="14" fontWeight="600" fill="#000000">
-                      Plaid
-                    </text>
-                  </svg>
-                  <span className="font-medium text-gray-900">Connect with Plaid</span>
-                </button>
-              ) : (
-                <div className="flex items-center gap-3 p-4 bg-green-50 border border-green-200 rounded-lg">
-                  <div className="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
-                    <span className="text-white text-sm">✓</span>
-                  </div>
+            <div className="space-y-4">
+              <button
+                onClick={() => handleModeSelection("individual")}
+                className="w-full p-6 border-2 border-gray-300 rounded-xl hover:border-[#FFD166] hover:bg-[#FFD166]/10 transition-all text-left"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="w-12 h-12 bg-[#FFD166] rounded-lg flex items-center justify-center text-2xl">👤</div>
                   <div>
-                    <p className="font-medium text-gray-900">Bank account connected</p>
-                    <p className="text-sm text-gray-600">Your account is now synced</p>
+                    <h5 className="font-semibold text-gray-900 mb-1">Individual</h5>
+                    <p className="text-sm text-gray-600">
+                      Perfect for freelancers and individuals tracking their personal subscriptions
+                    </p>
+                    <p className="text-xs text-[#007A5C] mt-2 font-medium">$5/month - Pro Plan</p>
                   </div>
                 </div>
-              )}
+              </button>
+
+              <button
+                onClick={() => handleModeSelection("enterprise")}
+                className="w-full p-6 border-2 border-gray-300 rounded-xl hover:border-[#FFD166] hover:bg-[#FFD166]/10 transition-all text-left"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="w-12 h-12 bg-[#1E2A35] rounded-lg flex items-center justify-center text-2xl">🏢</div>
+                  <div>
+                    <h5 className="font-semibold text-gray-900 mb-1">Enterprise</h5>
+                    <p className="text-sm text-gray-600">
+                      For teams and organizations managing multiple subscriptions across team members
+                    </p>
+                    <p className="text-xs text-[#007A5C] mt-2 font-medium">$60/month - Enterprise Plan</p>
+                  </div>
+                </div>
+              </button>
             </div>
           )}
         </div>
 
-        {/* Footer */}
+        {/* Footer Buttons */}
         <div className="space-y-3">
-          <button
-            onClick={handleNext}
-            disabled={!isStepValid()}
-            className="w-full py-3 bg-black text-white rounded-lg font-medium hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
-          >
-            {step === 6 ? "Get Started" : "Continue"}
-            <ArrowRight className="w-4 h-4" />
-          </button>
-          {step === 6 && (
+          {step === 3 && !isScanning && (
+            <>
+              <button
+                onClick={handleNext}
+                className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
+              >
+                Continue with selected Subscriptions
+                <ArrowRight className="w-4 h-4" />
+              </button>
+              <button className="w-full py-3 bg-white text-gray-700 rounded-lg font-medium hover:bg-gray-100 transition-colors border border-gray-300">
+                Add More Subscriptions Manually
+              </button>
+            </>
+          )}
+
+          {step === 4 && (
+            <>
+              <button
+                onClick={handleNext}
+                className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
+              >
+                Continue
+                <ArrowRight className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleNext}
+                className="w-full py-3 bg-white text-gray-700 rounded-lg font-medium hover:bg-gray-100 transition-colors border border-gray-300"
+              >
+                Skip setup for now
+              </button>
+            </>
+          )}
+
+          {step === 5 && (
+            <>
+              <button
+                onClick={handleNext}
+                className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
+              >
+                {Object.values(apiKeys).some((k) => k.key) ? "Continue with API Keys" : "Continue"}
+                <ArrowRight className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleNext}
+                className="w-full py-3 bg-white text-gray-700 rounded-lg font-medium hover:bg-gray-100 transition-colors border border-gray-300"
+              >
+                Skip for now - I'll add them later
+              </button>
+            </>
+          )}
+
+          {step !== 3 && step !== 4 && step !== 5 && step !== 6 && (
             <button
-              onClick={handleSkipBanking}
-              className="w-full py-3 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition-colors"
+              onClick={handleNext}
+              disabled={!isStepValid()}
+              className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
             >
-              Skip for now
+              Continue
+              <ArrowRight className="w-4 h-4" />
             </button>
           )}
         </div>
