@@ -5,11 +5,22 @@ const API_BASE =
 
 const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true,
+  withCredentials: true, // This ensures cookies are sent with requests
   headers: {
     "Content-Type": "application/json",
   },
 });
+
+// Add response interceptor to log auth errors
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      console.debug("401 Unauthorized - user not authenticated");
+    }
+    return Promise.reject(error);
+  }
+);
 
 // Simple wrappers to normalize responses and errors
 export async function apiGet(path: string, config = {}) {

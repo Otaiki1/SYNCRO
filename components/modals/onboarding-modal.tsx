@@ -758,7 +758,7 @@ export default function OnboardingModal({
                 <div className="space-y-3">
                   <div>
                     <label className="block text-sm text-gray-700 mb-2">
-                      Monthly AI budget limit
+                      Monthly budget limit
                     </label>
                     <input
                       type="text"
@@ -769,7 +769,7 @@ export default function OnboardingModal({
                           budgetLimit: e.target.value,
                         })
                       }
-                      placeholder="e.g., $150"
+                      placeholder="e.g., $200"
                       className="w-full px-4 py-2 bg-[#F9F6F2] border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 text-gray-900"
                     />
                   </div>

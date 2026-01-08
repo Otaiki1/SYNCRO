@@ -5,17 +5,52 @@ import { apiGet, apiPost } from "../lib/api";
 
 export function useAuth() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [showLandingAuth, setShowLandingAuth] = useState(true);
+  const [showLandingAuth, setShowLandingAuth] = useState(true); // Show landing page with Google button
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
 
+  // Function to manually refresh auth state
+  const refreshAuth = useCallback(async () => {
+    try {
+      const res = await apiGet("/api/auth/me");
+      if (res?.user) {
+        setIsAuthenticated(true);
+        setShowLandingAuth(false);
+        const onboardingCompleted = localStorage.getItem("onboarding_completed");
+        if (!onboardingCompleted) {
+          setShowOnboarding(true);
+        }
+        return true;
+      } else {
+        setIsAuthenticated(false);
+        setShowLandingAuth(true);
+        return false;
+      }
+    } catch (error) {
+      console.debug("Auth refresh failed:", error);
+      setIsAuthenticated(false);
+      setShowLandingAuth(true);
+      return false;
+    }
+  }, []);
+
   // Check authentication status on mount by calling backend
   useEffect(() => {
     const checkAuth = async () => {
+      // If we just came from OAuth success, add a small delay
+      const oauthSuccess = sessionStorage.getItem("oauth_success");
+      if (oauthSuccess) {
+        // Clear the flag
+        sessionStorage.removeItem("oauth_success");
+        // Add delay to ensure cookie is available
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      
       try {
         const res = await apiGet("/api/auth/me");
         if (res?.user) {
+          console.log("✅ User authenticated:", res.user.email);
           setIsAuthenticated(true);
           setShowLandingAuth(false);
           // Keep existing onboarding flow (frontend still uses onboarding flag stored locally)
@@ -25,10 +60,15 @@ export function useAuth() {
           if (!onboardingCompleted) {
             setShowOnboarding(true);
           }
+        } else {
+          // Not authenticated - show landing page with Google button
+          console.debug("❌ No user in auth response");
+          setShowLandingAuth(true);
         }
       } catch (error: unknown) {
-        // Not authenticated or failed to reach API - remain unauthenticated
+        // Not authenticated or failed to reach API - show landing page with Google button
         console.debug("Auth check failed:", error);
+        setShowLandingAuth(true);
       }
     };
     checkAuth();
@@ -71,6 +111,31 @@ export function useAuth() {
     setIsAuthenticated(true); // Set authenticated so they can proceed after onboarding
   }, []);
 
+  // Listen for storage events (when OAuth success sets sessionStorage)
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "oauth_success" && e.newValue === "true") {
+        // OAuth just completed, refresh auth state
+        setTimeout(() => {
+          refreshAuth();
+        }, 500);
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    
+    // Also check if oauth_success is already set (same-tab scenario)
+    if (sessionStorage.getItem("oauth_success") === "true") {
+      setTimeout(() => {
+        refreshAuth();
+      }, 500);
+    }
+
+    return () => {
+      window.removeEventListener("storage", handleStorageChange);
+    };
+  }, [refreshAuth]);
+
   return {
     isAuthenticated,
     showLandingAuth,
@@ -82,5 +147,6 @@ export function useAuth() {
     setShowOnboarding,
     handleLogin,
     handleSignup,
+    refreshAuth,
   };
 }
