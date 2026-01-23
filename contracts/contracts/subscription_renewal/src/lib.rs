@@ -61,10 +61,8 @@ impl SubscriptionRenewalContract {
         let current_ledger = env.ledger().sequence();
 
         // Check cooldown
-        if data.failure_count > 0 {
-            if current_ledger < data.last_attempt_ledger + cooldown_ledgers {
-                panic!("Cooldown period active");
-            }
+        if data.failure_count > 0 && current_ledger < data.last_attempt_ledger + cooldown_ledgers {
+            panic!("Cooldown period active");
         }
 
         if succeed {
@@ -74,14 +72,16 @@ impl SubscriptionRenewalContract {
             data.last_attempt_ledger = current_ledger;
             env.storage().persistent().set(&key, &data);
 
+            #[allow(deprecated)]
             env.events()
                 .publish((symbol_short!("renewed"), sub_id), data.owner);
-            return true;
+            true
         } else {
             // Simulated failure
             data.failure_count += 1;
             data.last_attempt_ledger = current_ledger;
 
+            #[allow(deprecated)]
             env.events().publish(
                 (symbol_short!("failed"), sub_id),
                 (data.failure_count, current_ledger),
@@ -89,12 +89,14 @@ impl SubscriptionRenewalContract {
 
             if data.failure_count > max_retries {
                 data.state = SubscriptionState::Failed;
+                #[allow(deprecated)]
                 env.events().publish(
                     (symbol_short!("state_ch"), sub_id),
                     SubscriptionState::Failed,
                 );
             } else {
                 data.state = SubscriptionState::Retrying;
+                #[allow(deprecated)]
                 env.events().publish(
                     (symbol_short!("state_ch"), sub_id),
                     SubscriptionState::Retrying,
@@ -102,7 +104,7 @@ impl SubscriptionRenewalContract {
             }
 
             env.storage().persistent().set(&key, &data);
-            return false;
+            false
         }
     }
 
