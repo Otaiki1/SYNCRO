@@ -17,6 +17,35 @@ struct ApprovalKey {
     approval_id: u64,
 }
 
+/// Storage key for cycle-level deduplication per subscription
+#[contracttype]
+#[derive(Clone)]
+struct CycleKey {
+    sub_id: u64,
+}
+
+/// Storage key for renewal processing lock
+#[contracttype]
+#[derive(Clone)]
+struct RenewalLockKey {
+    lock_sub_id: u64,
+}
+
+/// Storage key for lifecycle timestamps per subscription
+#[contracttype]
+#[derive(Clone)]
+struct LifecycleKey {
+    lifecycle_sub_id: u64,
+}
+
+/// Data stored for an active renewal lock
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenewalLockData {
+    pub locked_at: u32,
+    pub lock_timeout: u32,
+}
+
 /// Renewal approval bound to subscription, amount, and expiration
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +63,7 @@ pub enum SubscriptionState {
     Active,
     Retrying,
     Failed,
+    Cancelled,
 }
 
 /// Core subscription data stored on-chain
@@ -44,6 +74,17 @@ pub struct SubscriptionData {
     pub state: SubscriptionState,
     pub failure_count: u32,
     pub last_attempt_ledger: u32,
+}
+
+/// Immutable audit timestamps for subscription lifecycle events.
+/// All timestamps are Unix epoch seconds from env.ledger().timestamp().
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleTimestamps {
+    pub created_at: u64,
+    pub activated_at: u64,
+    pub last_renewed_at: u64,
+    pub canceled_at: u64,
 }
 
 /// Events for subscription renewal tracking
@@ -84,6 +125,39 @@ pub struct ApprovalRejected {
     pub sub_id: u64,
     pub approval_id: u64,
     pub reason: u32, // 1=expired, 2=used, 3=amount_exceeded, 4=not_found
+}
+
+#[contractevent]
+pub struct DuplicateRenewalRejected {
+    pub sub_id: u64,
+    pub cycle_id: u64,
+}
+
+#[contractevent]
+pub struct RenewalLockAcquired {
+    pub sub_id: u64,
+    pub locked_at: u32,
+    pub lock_timeout: u32,
+}
+
+#[contractevent]
+pub struct RenewalLockReleased {
+    pub sub_id: u64,
+    pub released_at: u32,
+}
+
+#[contractevent]
+pub struct RenewalLockExpired {
+    pub sub_id: u64,
+    pub original_locked_at: u32,
+    pub expired_at: u32,
+}
+
+#[contractevent]
+pub struct LifecycleTimestampUpdated {
+    pub sub_id: u64,
+    pub event_kind: u32, // 1=created, 2=activated, 3=renewed, 4=canceled
+    pub timestamp: u64,
 }
 
 #[contract]
@@ -127,6 +201,73 @@ impl SubscriptionRenewalContract {
             .unwrap_or(false)
     }
 
+    // ── Renewal lock management ────────────────────────────────────
+
+    /// Acquire a processing lock for a subscription renewal.
+    /// Prevents concurrent renewal execution by multiple workers.
+    pub fn acquire_renewal_lock(env: Env, sub_id: u64, lock_timeout: u32) {
+        if Self::is_paused(env.clone()) {
+            panic!("Protocol is paused");
+        }
+
+        let lock_key = RenewalLockKey { lock_sub_id: sub_id };
+        let current_ledger = env.ledger().sequence();
+
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<RenewalLockKey, RenewalLockData>(&lock_key)
+        {
+            // Check if existing lock has expired
+            if current_ledger < existing.locked_at + existing.lock_timeout {
+                panic!("Renewal lock active");
+            }
+            // Lock expired — emit expiry event and allow re-acquisition
+            RenewalLockExpired {
+                sub_id,
+                original_locked_at: existing.locked_at,
+                expired_at: current_ledger,
+            }
+            .publish(&env);
+        }
+
+        let lock_data = RenewalLockData {
+            locked_at: current_ledger,
+            lock_timeout,
+        };
+        env.storage().persistent().set(&lock_key, &lock_data);
+
+        RenewalLockAcquired {
+            sub_id,
+            locked_at: current_ledger,
+            lock_timeout,
+        }
+        .publish(&env);
+    }
+
+    /// Release a processing lock for a subscription renewal.
+    pub fn release_renewal_lock(env: Env, sub_id: u64) {
+        let lock_key = RenewalLockKey { lock_sub_id: sub_id };
+        if !env.storage().persistent().has(&lock_key) {
+            panic!("No renewal lock to release");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        env.storage().persistent().remove(&lock_key);
+
+        RenewalLockReleased {
+            sub_id,
+            released_at: current_ledger,
+        }
+        .publish(&env);
+    }
+
+    /// Query the current renewal lock for a subscription.
+    pub fn get_renewal_lock(env: Env, sub_id: u64) -> Option<RenewalLockData> {
+        let lock_key = RenewalLockKey { lock_sub_id: sub_id };
+        env.storage().persistent().get(&lock_key)
+    }
+
     // ── Subscription logic ────────────────────────────────────────
 
     /// Initialize a subscription
@@ -139,6 +280,78 @@ impl SubscriptionRenewalContract {
             last_attempt_ledger: 0,
         };
         env.storage().persistent().set(&key, &data);
+
+        // Initialize lifecycle timestamps
+        let now = env.ledger().timestamp();
+        let lifecycle = LifecycleTimestamps {
+            created_at: now,
+            activated_at: now,
+            last_renewed_at: 0,
+            canceled_at: 0,
+        };
+        let lc_key = LifecycleKey {
+            lifecycle_sub_id: sub_id,
+        };
+        env.storage().persistent().set(&lc_key, &lifecycle);
+
+        LifecycleTimestampUpdated {
+            sub_id,
+            event_kind: 1,
+            timestamp: now,
+        }
+        .publish(&env);
+        LifecycleTimestampUpdated {
+            sub_id,
+            event_kind: 2,
+            timestamp: now,
+        }
+        .publish(&env);
+    }
+
+    /// Explicitly cancel a subscription
+    pub fn cancel_sub(env: Env, sub_id: u64) {
+        let key = sub_id;
+        let mut data: SubscriptionData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Subscription not found");
+
+        data.owner.require_auth();
+
+        if data.state == SubscriptionState::Cancelled {
+            panic!("Subscription already cancelled");
+        }
+
+        data.state = SubscriptionState::Cancelled;
+        env.storage().persistent().set(&key, &data);
+
+        // Update lifecycle timestamps
+        let lc_key = LifecycleKey {
+            lifecycle_sub_id: sub_id,
+        };
+        let mut lifecycle: LifecycleTimestamps = env
+            .storage()
+            .persistent()
+            .get(&lc_key)
+            .expect("Lifecycle data not found");
+        let now = env.ledger().timestamp();
+        lifecycle.canceled_at = now;
+        env.storage().persistent().set(&lc_key, &lifecycle);
+
+        LifecycleTimestampUpdated {
+            sub_id,
+            event_kind: 4,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        // Emit state transition event
+        StateTransition {
+            sub_id,
+            new_state: SubscriptionState::Cancelled,
+        }
+        .publish(&env);
     }
 
     // ── Approval management ───────────────────────────────────────
@@ -252,18 +465,18 @@ impl SubscriptionRenewalContract {
         amount: i128,
         max_retries: u32,
         cooldown_ledgers: u32,
+        cycle_id: u64,
         succeed: bool,
     ) -> bool {
-        // Check global pause
+        // 1. Check global pause
         if Self::is_paused(env.clone()) {
             panic!("Protocol is paused");
         }
 
-        // Validate and consume approval
-        if !Self::consume_approval(&env, sub_id, approval_id, amount) {
-            panic!("Invalid or expired approval");
-        }
+        // Get current ledger early (needed for lock verification)
+        let current_ledger = env.ledger().sequence();
 
+        // 2. Load subscription data
         let key = sub_id;
         let mut data: SubscriptionData = env
             .storage()
@@ -271,24 +484,55 @@ impl SubscriptionRenewalContract {
             .get(&key)
             .expect("Subscription not found");
 
-        // If already failed, we can't renew (or maybe we specifically handle this, but simpler to abort)
+        // 3. Check failed state
         if data.state == SubscriptionState::Failed {
             panic!("Subscription is in FAILED state");
         }
 
-        let current_ledger = env.ledger().sequence();
+        // 4. Verify renewal lock exists and is not expired
+        let lock_key = RenewalLockKey { lock_sub_id: sub_id };
+        let lock_data: Option<RenewalLockData> = env.storage().persistent().get(&lock_key);
+        match lock_data {
+            None => panic!("Renewal lock required"),
+            Some(ref ld) => {
+                if current_ledger >= ld.locked_at + ld.lock_timeout {
+                    panic!("Renewal lock expired");
+                }
+            }
+        }
 
-        // Check cooldown
+        // 5. Cycle guard: reject duplicate renewal for the same billing cycle
+        let cycle_key = CycleKey { sub_id };
+        let last_cycle: Option<u64> = env.storage().persistent().get(&cycle_key);
+        if let Some(last) = last_cycle {
+            if cycle_id == last {
+                DuplicateRenewalRejected { sub_id, cycle_id }.publish(&env);
+                panic!("Duplicate renewal for cycle");
+            }
+        }
+
+        // 6. Check cooldown
         if data.failure_count > 0 && current_ledger < data.last_attempt_ledger + cooldown_ledgers {
             panic!("Cooldown period active");
         }
 
+        // 7. Validate and consume approval
+        if !Self::consume_approval(&env, sub_id, approval_id, amount) {
+            panic!("Invalid or expired approval");
+        }
+
         if succeed {
+            // Capture previous state before changing it
+            let previous_state = data.state;
+
             // Simulated success - renewal successful
             data.state = SubscriptionState::Active;
             data.failure_count = 0;
             data.last_attempt_ledger = current_ledger;
             env.storage().persistent().set(&key, &data);
+
+            // Store cycle_id on success only
+            env.storage().persistent().set(&cycle_key, &cycle_id);
 
             // Emit renewal success event
             RenewalSuccess {
@@ -297,9 +541,49 @@ impl SubscriptionRenewalContract {
             }
             .publish(&env);
 
+            // Update lifecycle timestamps
+            let lc_key = LifecycleKey {
+                lifecycle_sub_id: sub_id,
+            };
+            let mut lifecycle: LifecycleTimestamps = env
+                .storage()
+                .persistent()
+                .get(&lc_key)
+                .expect("Lifecycle data not found");
+            let now = env.ledger().timestamp();
+            lifecycle.last_renewed_at = now;
+
+            LifecycleTimestampUpdated {
+                sub_id,
+                event_kind: 3,
+                timestamp: now,
+            }
+            .publish(&env);
+
+            // If recovering from Retrying, also update activated_at
+            if previous_state == SubscriptionState::Retrying {
+                lifecycle.activated_at = now;
+                LifecycleTimestampUpdated {
+                    sub_id,
+                    event_kind: 2,
+                    timestamp: now,
+                }
+                .publish(&env);
+            }
+            env.storage().persistent().set(&lc_key, &lifecycle);
+
+            // Auto-release lock
+            env.storage().persistent().remove(&lock_key);
+            RenewalLockReleased {
+                sub_id,
+                released_at: current_ledger,
+            }
+            .publish(&env);
+
             true
         } else {
             // Simulated failure - renewal failed, apply retry logic
+            // Do NOT store cycle_id on failure — retries with same cycle_id remain allowed
             data.failure_count += 1;
             data.last_attempt_ledger = current_ledger;
 
@@ -329,6 +613,15 @@ impl SubscriptionRenewalContract {
             }
 
             env.storage().persistent().set(&key, &data);
+
+            // Auto-release lock
+            env.storage().persistent().remove(&lock_key);
+            RenewalLockReleased {
+                sub_id,
+                released_at: current_ledger,
+            }
+            .publish(&env);
+
             false
         }
     }
@@ -338,6 +631,16 @@ impl SubscriptionRenewalContract {
             .persistent()
             .get(&sub_id)
             .expect("Subscription not found")
+    }
+
+    pub fn get_lifecycle(env: Env, sub_id: u64) -> LifecycleTimestamps {
+        let lc_key = LifecycleKey {
+            lifecycle_sub_id: sub_id,
+        };
+        env.storage()
+            .persistent()
+            .get(&lc_key)
+            .expect("Lifecycle data not found")
     }
 }
 
