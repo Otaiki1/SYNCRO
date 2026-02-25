@@ -1,8 +1,17 @@
 #![no_std]
-use soroban_sdk::{contract, contractevent, contractimpl, contracttype, Address, Env};
 
-/// Storage keys for contract-level state (admin, pause flag).
-#[contracttype]
+use soroban_sdk::{
+    contract,
+    contractevent,
+    contractimpl,
+    contracttype,
+    token,
+    xdr::ToXdr,
+    Address,
+    Bytes,
+    Env,
+    IntoVal,
+};#[contracttype]
 #[derive(Clone)]
 enum ContractKey {
     Admin,
@@ -237,64 +246,15 @@ impl SubscriptionRenewalContract {
             max_spend,
             expires_at,
         }
+
+        let config = FeeConfig { percentage, recipient: recipient.clone() };
+        env.storage().instance().set(&ContractKey::FeeConfig, &config);
+
+        FeeConfigUpdated {
+            percentage,
+            recipient,
+        }
         .publish(&env);
-    }
-
-    /// Validate and consume an approval
-    fn consume_approval(env: &Env, sub_id: u64, approval_id: u64, amount: i128) -> bool {
-        let key = ApprovalKey {
-            sub_id,
-            approval_id,
-        };
-
-        let approval_opt: Option<RenewalApproval> = env.storage().persistent().get(&key);
-
-        if approval_opt.is_none() {
-            ApprovalRejected {
-                sub_id,
-                approval_id,
-                reason: 4,
-            }
-            .publish(env);
-            return false;
-        }
-
-        let mut approval = approval_opt.unwrap();
-
-        if approval.used {
-            ApprovalRejected {
-                sub_id,
-                approval_id,
-                reason: 2,
-            }
-            .publish(env);
-            return false;
-        }
-
-        let current_ledger = env.ledger().sequence();
-        if current_ledger > approval.expires_at {
-            ApprovalRejected {
-                sub_id,
-                approval_id,
-                reason: 1,
-            }
-            .publish(env);
-            return false;
-        }
-
-        if amount > approval.max_spend {
-            ApprovalRejected {
-                sub_id,
-                approval_id,
-                reason: 3,
-            }
-            .publish(env);
-            return false;
-        }
-
-        approval.used = true;
-        env.storage().persistent().set(&key, &approval);
-        true
     }
 
     // ── Renewal logic ─────────────────────────────────────────────
@@ -402,13 +362,10 @@ impl SubscriptionRenewalContract {
         }
     }
 
-    pub fn get_sub(env: Env, sub_id: u64) -> SubscriptionData {
+    /// Set the logging contract address. Admin only.
+    pub fn set_logging_contract(env: Env, address: Address) {
+        Self::require_admin(&env);
         env.storage()
-            .persistent()
-            .get(&sub_id)
-            .expect("Subscription not found")
+            .instance()
+            .set(&ContractKey::LoggingContract, &address);
     }
-}
-
-#[cfg(test)]
-mod test;
