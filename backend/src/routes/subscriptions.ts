@@ -1,12 +1,28 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import multer from 'multer';
 import { subscriptionService } from '../services/subscription-service';
 import { giftCardService } from '../services/gift-card-service';
 import { idempotencyService } from '../services/idempotency';
 import { notificationPreferenceService } from '../services/notification-preference-service';
 import { authenticate, AuthenticatedRequest } from '../middleware/auth';
 import { validateSubscriptionOwnership, validateBulkSubscriptionOwnership } from '../middleware/ownership';
+import { auditService } from '../services/audit-service';
+import { previewImport, commitImport, CSV_TEMPLATE } from '../services/csv-import-service';
 import logger from '../config/logger';
+import { SUPPORTED_CURRENCIES } from '../constants/currencies';
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1 * 1024 * 1024 }, // 1 MB
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are accepted'));
+    }
+  },
+});
 
 // ── Zod schemas ───────────────────────────────────────────────────────────────
 
@@ -30,6 +46,12 @@ const createSubscriptionSchema = z.object({
   name: z.string().min(1),
   price: z.number(),
   billing_cycle: z.enum(['monthly', 'yearly', 'quarterly']),
+  currency: z.string()
+    .refine(
+      (val) => (SUPPORTED_CURRENCIES as readonly string[]).includes(val),
+      { message: `Currency must be one of: ${SUPPORTED_CURRENCIES.join(', ')}` }
+    )
+    .optional(),
   renewal_url: safeUrlSchema.optional(),
   website_url: safeUrlSchema.optional(),
   logo_url: safeUrlSchema.optional(),
@@ -73,23 +95,26 @@ router.use(authenticate);
  */
 router.get('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { status, category, limit, offset } = req.query;
+    const { status, category, limit, offset } = req.query as Record<string, unknown>;
+
+    const allowedStatuses = new Set(['active','expired','cancelled','paused','trial']);
+    const normalizedStatus =
+      typeof status === 'string' && allowedStatuses.has(status) ? (status as any) : undefined;
+    const normalizedCategory = typeof category === 'string' ? category : undefined;
+    const lim = typeof limit === 'string' ? parseInt(limit) : undefined;
+    const off = typeof offset === 'string' ? parseInt(offset) : undefined;
 
     const result = await subscriptionService.listSubscriptions(req.user!.id, {
-      status: status as string | undefined,
-      category: category as string | undefined,
-      limit: limit ? parseInt(limit as string) : undefined,
-      offset: offset ? parseInt(offset as string) : undefined,
+      status: normalizedStatus,
+      category: normalizedCategory,
+      limit: lim,
+      offset: off,
     });
 
     res.json({
       success: true,
       data: result.subscriptions,
-      pagination: {
-        total: result.total,
-        limit: limit ? parseInt(limit as string) : undefined,
-        offset: offset ? parseInt(offset as string) : undefined,
-      },
+      pagination: { total: result.total, limit: lim, offset: off },
     });
   } catch (error) {
     logger.error('List subscriptions error:', error);
@@ -401,6 +426,9 @@ router.post('/:id/retry-sync', validateSubscriptionOwnership, async (req: Authen
 router.get('/:id/cooldown-status', validateSubscriptionOwnership, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const cooldownStatus = await subscriptionService.checkRenewalCooldown(req.params.id);
+    const cooldownStatus = await subscriptionService.checkRenewalCooldown(
+      Array.isArray(req.params.id) ? req.params.id[0] : req.params.id,
+    );
 
     res.json({
       success: true,
@@ -443,7 +471,7 @@ router.post('/:id/cancel', validateSubscriptionOwnership, async (req: Authentica
 
     const result = await subscriptionService.cancelSubscription(
       req.user!.id,
-      req.params.id,
+      Array.isArray(req.params.id) ? req.params.id[0] : req.params.id,
     );
 
     const responseBody = {
@@ -476,6 +504,164 @@ router.post('/:id/cancel', validateSubscriptionOwnership, async (req: Authentica
     res.status(statusCode).json({
       success: false,
       error: error instanceof Error ? error.message : 'Failed to cancel subscription',
+    });
+  }
+});
+
+/**
+ * POST /api/subscriptions/:id/pause
+ * Pause subscription — skips reminders, risk scoring, and projected spend
+ * Body: { resumeAt?: string (ISO date), reason?: string }
+ */
+/**
+ * POST /api/subscriptions/:id/pause
+ * Pause subscription — skips reminders, risk scoring, and projected spend
+ * Body: { resumeAt?: string (ISO date), reason?: string }
+ */
+router.post("/:id/pause", validateSubscriptionOwnership, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] as string;
+    const requestHash = idempotencyService.hashRequest(req.body);
+
+    if (idempotencyKey) {
+      const idempotencyCheck = await idempotencyService.checkIdempotency(
+        idempotencyKey,
+        req.user!.id,
+        requestHash,
+      );
+
+      if (idempotencyCheck.isDuplicate && idempotencyCheck.cachedResponse) {
+        return res
+          .status(idempotencyCheck.cachedResponse.status)
+          .json(idempotencyCheck.cachedResponse.body);
+      }
+    }
+
+    const pauseSchema = z.object({
+      resumeAt: z.string().datetime({ offset: true }).optional(),
+      reason: z.string().max(500).optional(),
+    });
+
+    const validation = pauseSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.errors.map((e) => e.message).join(", "),
+      });
+    }
+
+    const { resumeAt, reason } = validation.data;
+
+    if (resumeAt && new Date(resumeAt) <= new Date()) {
+      return res.status(400).json({
+        success: false,
+        error: "resumeAt must be a future date",
+      });
+    }
+
+    const result = await subscriptionService.pauseSubscription(
+      req.user!.id,
+      Array.isArray(req.params.id) ? req.params.id[0] : req.params.id,
+      resumeAt,
+      reason,
+    );
+
+    const responseBody = {
+      success: true,
+      data: result.subscription,
+      blockchain: {
+        synced: result.syncStatus === "synced",
+        transactionHash: result.blockchainResult?.transactionHash,
+        error: result.blockchainResult?.error,
+      },
+    };
+
+    const statusCode = result.syncStatus === "failed" ? 207 : 200;
+
+    if (idempotencyKey) {
+      await idempotencyService.storeResponse(
+        idempotencyKey,
+        req.user!.id,
+        requestHash,
+        statusCode,
+        responseBody,
+      );
+    }
+
+    res.status(statusCode).json(responseBody);
+  } catch (error) {
+    logger.error("Pause subscription error:", error);
+    const statusCode =
+      error instanceof Error && error.message.includes("not found") ? 404
+      : error instanceof Error && error.message.includes("already paused") ? 409
+      : 500;
+    res.status(statusCode).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to pause subscription",
+    });
+  }
+});
+
+/**
+ * POST /api/subscriptions/:id/resume
+ * Resume a paused subscription — re-enables reminders and risk scoring
+ */
+router.post("/:id/resume", validateSubscriptionOwnership, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] as string;
+    const requestHash = idempotencyService.hashRequest(req.body);
+
+    if (idempotencyKey) {
+      const idempotencyCheck = await idempotencyService.checkIdempotency(
+        idempotencyKey,
+        req.user!.id,
+        requestHash,
+      );
+
+      if (idempotencyCheck.isDuplicate && idempotencyCheck.cachedResponse) {
+        return res
+          .status(idempotencyCheck.cachedResponse.status)
+          .json(idempotencyCheck.cachedResponse.body);
+      }
+    }
+
+    const result = await subscriptionService.resumeSubscription(
+      req.user!.id,
+      Array.isArray(req.params.id) ? req.params.id[0] : req.params.id,
+    );
+
+    const responseBody = {
+      success: true,
+      data: result.subscription,
+      blockchain: {
+        synced: result.syncStatus === "synced",
+        transactionHash: result.blockchainResult?.transactionHash,
+        error: result.blockchainResult?.error,
+      },
+    };
+
+    const statusCode = result.syncStatus === "failed" ? 207 : 200;
+
+    if (idempotencyKey) {
+      await idempotencyService.storeResponse(
+        idempotencyKey,
+        req.user!.id,
+        requestHash,
+        statusCode,
+        responseBody,
+      );
+    }
+
+    res.status(statusCode).json(responseBody);
+  } catch (error) {
+    logger.error("Resume subscription error:", error);
+    const statusCode =
+      error instanceof Error && error.message.includes("not found") ? 404
+      : error instanceof Error && error.message.includes("not paused") ? 409
+      : 500;
+    res.status(statusCode).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to resume subscription",
     });
   }
 });
@@ -625,5 +811,75 @@ function extractWaitTime(message: string): number {
   const match = message.match(/wait (\d+) seconds/);
   return match ? parseInt(match[1], 10) : 60;
 }
+
+// ─── CSV Import ─────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/subscriptions/import/template
+ * Download the CSV template.
+ */
+router.get('/import/template', authenticate, (_req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="syncro-import-template.csv"');
+  res.send(CSV_TEMPLATE);
+});
+
+/**
+ * POST /api/subscriptions/import
+ * Preview (default) or commit (commit=true) a CSV import.
+ *
+ * Query params:
+ *   commit=true        — save valid rows instead of just previewing
+ *   skip_dupes=false   — import duplicates anyway (default: skip)
+ */
+router.post(
+  '/import',
+  authenticate,
+  upload.single('file'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+      if (!req.file) {
+        return res.status(400).json({ success: false, error: 'No CSV file uploaded' });
+      }
+
+      const isCommit = req.query.commit === 'true';
+      const skipDupes = req.query.skip_dupes !== 'false';
+
+      // Always preview first (validates + deduplicates)
+      const preview = await previewImport(req.file.buffer, userId);
+
+      if (!isCommit) {
+        return res.status(200).json({ success: true, data: { preview } });
+      }
+
+      // Commit
+      const result = await commitImport(preview.rows, userId, skipDupes);
+
+      // Log to audit trail
+      await auditService.insertEntry({
+        userId,
+        action: 'csv_import',
+        resourceType: 'subscription',
+        metadata: {
+          imported: result.imported,
+          skipped: result.skipped,
+          errors: result.errors,
+          filename: req.file.originalname,
+        },
+      });
+
+      logger.info('CSV import committed', { userId, ...result });
+
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Import failed';
+      logger.error('CSV import error:', error);
+      return res.status(400).json({ success: false, error: message });
+    }
+  },
+);
 
 export default router;

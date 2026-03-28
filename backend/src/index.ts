@@ -16,14 +16,26 @@ import simulationRoutes from './routes/simulation';
 import merchantRoutes from './routes/merchants';
 import teamRoutes from './routes/team';
 import auditRoutes from './routes/audit';
+import webhookRoutes from './routes/webhooks';
+import tagsRoutes from './routes/tags';
+import { createExchangeRatesRouter } from './routes/exchange-rates';
+import { ExchangeRateService } from './services/exchange-rate/exchange-rate-service';
+import { FiatRateProvider } from './services/exchange-rate/fiat-provider';
+import { CryptoRateProvider } from './services/exchange-rate/crypto-provider';
 import { monitoringService } from './services/monitoring-service';
 import { healthService } from './services/health-service';
 import { eventListener } from './services/event-listener';
 import { expiryService } from './services/expiry-service';
+import { scheduleAutoResume } from './jobs/auto-resume';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'development-admin-key';
+
+const exchangeRateService = new ExchangeRateService([
+  new FiatRateProvider(),
+  new CryptoRateProvider(),
+]);
 
 // CORS configuration
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -49,6 +61,7 @@ app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 
 import { adminAuth } from './middleware/admin';
+import { createAdminLimiter, RateLimiterFactory } from './middleware/rate-limit-factory';
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -62,6 +75,10 @@ app.use('/api/simulation', simulationRoutes);
 app.use('/api/merchants', merchantRoutes);
 app.use('/api/team', teamRoutes);
 app.use('/api/audit', auditRoutes);
+app.use('/api/webhooks', webhookRoutes);
+app.use('/api/tags', tagsRoutes);
+app.use('/api', tagsRoutes); // handles /api/subscriptions/:id/notes and /api/subscriptions/:id/tags
+app.use('/api/exchange-rates', createExchangeRatesRouter(exchangeRateService));
 
 // API Routes (Public/Standard)
 app.get('/api/reminders/status', (req, res) => {
@@ -70,7 +87,7 @@ app.get('/api/reminders/status', (req, res) => {
 });
 
 // Admin Monitoring Endpoints (Read-only)
-app.get('/api/admin/metrics/subscriptions', adminAuth, async (req, res) => {
+app.get('/api/admin/metrics/subscriptions', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     const metrics = await monitoringService.getSubscriptionMetrics();
     res.json(metrics);
@@ -79,7 +96,7 @@ app.get('/api/admin/metrics/subscriptions', adminAuth, async (req, res) => {
   }
 });
 
-app.get('/api/admin/metrics/renewals', adminAuth, async (req, res) => {
+app.get('/api/admin/metrics/renewals', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     const metrics = await monitoringService.getRenewalMetrics();
     res.json(metrics);
@@ -88,7 +105,7 @@ app.get('/api/admin/metrics/renewals', adminAuth, async (req, res) => {
   }
 });
 
-app.get('/api/admin/metrics/activity', adminAuth, async (req, res) => {
+app.get('/api/admin/metrics/activity', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     const metrics = await monitoringService.getAgentActivity();
     res.json(metrics);
@@ -98,7 +115,7 @@ app.get('/api/admin/metrics/activity', adminAuth, async (req, res) => {
 });
 
 // Protocol Health Monitor: unified admin health (metrics, alerts, history)
-app.get('/api/admin/health', adminAuth, async (req, res) => {
+app.get('/api/admin/health', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     const includeHistory = req.query.history !== 'false';
     const health = await healthService.getAdminHealth(includeHistory);
@@ -112,6 +129,8 @@ app.get('/api/admin/health', adminAuth, async (req, res) => {
 
 // Manual trigger endpoints (admin-protected)
 app.post('/api/reminders/process', adminAuth, async (req, res) => {
+// Manual trigger endpoints (for testing/admin - Should eventually be protected)
+app.post('/api/reminders/process', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     await reminderEngine.processReminders();
     res.json({ success: true, message: 'Reminders processed' });
@@ -124,7 +143,7 @@ app.post('/api/reminders/process', adminAuth, async (req, res) => {
   }
 });
 
-app.post('/api/reminders/schedule', adminAuth, async (req, res) => {
+app.post('/api/reminders/schedule', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     const daysBefore = req.body.daysBefore || [7, 3, 1];
     await reminderEngine.scheduleReminders(daysBefore);
@@ -138,7 +157,7 @@ app.post('/api/reminders/schedule', adminAuth, async (req, res) => {
   }
 });
 
-app.post('/api/reminders/retry', adminAuth, async (req, res) => {
+app.post('/api/reminders/retry', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     await reminderEngine.processRetries();
     res.json({ success: true, message: 'Retries processed' });
@@ -179,7 +198,7 @@ function startHealthSnapshotInterval() {
   setTimeout(() => healthService.recordSnapshot().catch(() => {}), 5000);
 }
 
-app.post('/api/admin/expiry/process', adminAuth, async (req, res) => {
+app.post('/api/admin/expiry/process', createAdminLimiter(), adminAuth, async (req, res) => {
   try {
     const result = await expiryService.processExpiries();
     res.json({ success: true, data: result });
@@ -193,9 +212,17 @@ app.post('/api/admin/expiry/process', adminAuth, async (req, res) => {
 });
 
 // Start server
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+
+  // Initialize rate limiting Redis store
+  try {
+    await RateLimiterFactory.initializeRedisStore();
+    logger.info('Rate limiting initialized successfully');
+  } catch (error) {
+    logger.warn('Rate limiting initialization failed, using memory store:', error);
+  }
 
   // Start scheduler
   schedulerService.start();
@@ -207,7 +234,11 @@ const server = app.listen(PORT, () => {
   eventListener.start().catch(err => {
     logger.error('Failed to start event listener:', err);
   });
+
+  scheduleAutoResume();
 });
+
+
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
