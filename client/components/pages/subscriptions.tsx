@@ -1,9 +1,10 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Edit2, Trash2, Mail, Clock, Copy, Lock, Users, Calendar, Check, Download, FileText } from "lucide-react"
+import { Edit2, Trash2, Mail, Clock, Copy, Lock, Users, Calendar, Check, Download, FileText, Upload } from "lucide-react"
 import { exportAllCSV, exportActiveCSV, exportDateRangeCSV } from "@/lib/csv-export"
 import { downloadSubscriptionPDF } from "@/lib/pdf-report"
+import CSVImportModal from "@/components/modals/csv-import-modal"
 
 import { useDebounce } from "@/hooks/use-debounce"
 import { VirtualizedList } from "@/components/ui/virtualized-list"
@@ -24,6 +25,7 @@ interface SubscriptionsPageProps {
   emailAccounts?: any[]
   duplicates?: any[]
   unusedSubscriptions?: any[]
+  onImportComplete?: () => void
 }
 
 export default function SubscriptionsPage({
@@ -39,6 +41,7 @@ export default function SubscriptionsPage({
   emailAccounts = [],
   duplicates = [],
   unusedSubscriptions = [],
+  onImportComplete,
 }: SubscriptionsPageProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const debouncedSearchTerm = useDebounce(searchTerm, 300)
@@ -51,6 +54,7 @@ export default function SubscriptionsPage({
   const [showUnusedOnly, setShowUnusedOnly] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [exportingPDF, setExportingPDF] = useState(false)
+  const [showCSVImport, setShowCSVImport] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -335,6 +339,17 @@ export default function SubscriptionsPage({
             </div>
           )}
         </div>
+
+        {/* Import CSV */}
+        <button
+          onClick={() => setShowCSVImport(true)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            darkMode ? "bg-[#2D3748] text-gray-400 hover:text-white" : "bg-gray-100 text-gray-600 hover:text-gray-900"
+          }`}
+        >
+          <Upload className="w-4 h-4" />
+          Import CSV
+        </button>
       </div>
 
       {/* Search and Filters */}
@@ -478,6 +493,17 @@ export default function SubscriptionsPage({
             </div>
           )}
         </>
+      )}
+
+      {showCSVImport && (
+        <CSVImportModal
+          darkMode={darkMode}
+          onClose={() => setShowCSVImport(false)}
+          onImportComplete={() => {
+            setShowCSVImport(false)
+            onImportComplete?.()
+          }}
+        />
       )}
 
       {selectedSubForCancel && (
